@@ -11,28 +11,41 @@ import glob
 
 pd.options.mode.chained_assignment = None
 
+# Load environment variables
 load_dotenv()
 
 ###############################   HEADERS (DON'T CHANGE)   #######################################################################################################
 headers = {
-    'Authorization': 'Bearer '+os.getenv('BRIGHTDATA_API_KEY'),
+    'Authorization': 'Bearer ' + os.getenv('BRIGHTDATA_API_KEY'),
     'Content-Type': 'application/json',
 }
 
 headers_status = {
-    'Authorization': 'Bearer '+os.getenv('BRIGHTDATA_API_KEY'),
+    'Authorization': 'Bearer ' + os.getenv('BRIGHTDATA_API_KEY'),
 }
 
+# Load keywords from Excel
 keywords = pd.read_excel("keywords.xlsx")
 
 #################################################################################################################################################################
-###############################   2.  IF SnapshotID IS NOT SET IN .XLSX FILE, TRIGGER CREATION OF THE SNAPSHOT   ################################################
+###############################   2.  IF SnapshotID IS NOT SET, TRIGGER CREATION OF THE SNAPSHOT   ##############################################################
 #################################################################################################################################################################
 
-file_exists = os.path.isfile(os.getenv("SNAPSHOT_STORAGE_FILE"))
+snapshot_file = os.getenv("SNAPSHOT_STORAGE_FILE")
+dataset_folder = os.getenv("DATASET_STORAGE_FOLDER")
 
+# Ensure dataset folder exists
+if not os.path.exists(dataset_folder):
+    os.makedirs(dataset_folder)
 
-if not file_exists:
+# Ensure snapshot file exists
+if not os.path.exists(snapshot_file):
+    open(snapshot_file, "w").close()
+
+file_exists = os.path.isfile(snapshot_file)
+
+if not file_exists or os.path.getsize(snapshot_file) == 0:
+    print("⚙️  No snapshot found. Creating a new BrightData snapshot...")
 
     params = {
         "dataset_id": "gd_lr9978962kkjr3nx49",
@@ -42,70 +55,89 @@ if not file_exists:
     }
 
     json_data = []
-
     for ind in keywords.index:
+        json_data.append({
+            "keyword": keywords.loc[ind, "Keyword"],
+            "pages_load": str(keywords.loc[ind, "Pages"])
+        })
 
-        json_data.append({"keyword":keywords.loc[ind, "Keyword"],"pages_load":str(keywords.loc[ind, "Pages"])})
+    response = requests.post(
+        'https://api.brightdata.com/datasets/v3/trigger',
+        params=params,
+        headers=headers,
+        json=json_data
+    )
 
-    response = requests.post('https://api.brightdata.com/datasets/v3/trigger', params=params, headers=headers, json=json_data)
+    print("Status Code:", response.status_code)
+    print("Response Text:", response.text)
 
-    result = json.loads(response.content)
+    try:
+        result = response.json()
+    except Exception as e:
+        print("❌ Error parsing JSON. Response was not valid JSON.")
+        print("Raw response:", response.text)
+        raise e
 
-    with open(os.getenv("SNAPSHOT_STORAGE_FILE"), "a") as f:
-        f.write(str(result["snapshot_id"]))
-
+    # ✅ Write snapshot ID to file
+    snapshot_id = str(result.get("snapshot_id", "")).strip()
+    if snapshot_id:
+        with open(snapshot_file, "w") as f:
+            f.write(snapshot_id)
+        print(f"✅ Snapshot ID saved to {snapshot_file} ({snapshot_id})")
+    else:
+        print("❌ Failed to get snapshot_id from BrightData response.")
+        exit(1)
 
 else:
+    #################################################################################################################################################################
+    ###############################   3.  IF SnapshotID IS SET, GET BACK THE CRAWLED DATA   #########################################################################
+    #################################################################################################################################################################
 
-#################################################################################################################################################################
-###############################   3.  IF SnapshotID IS SET, GET BACK THE CRAWLED DATA   #########################################################################
-#################################################################################################################################################################
+    print("📂 Using existing snapshot file:", snapshot_file)
 
-
-###############################   CHECK WHETHER ALL WEBSITES ARE CRAWLED   #######################################################################################
-
-    files = glob.glob(os.getenv("DATASET_STORAGE_FOLDER")+"*")	
-
+    # Remove any old dataset files
+    files = glob.glob(dataset_folder + "*")
     for f in files:
         os.remove(f)
 
+    # Read snapshot ID
+    with open(snapshot_file, "r") as f:
+        snapshot_id = f.read().strip()
 
+    if not snapshot_id:
+        print("❌ snapshot.txt is empty! Please delete it and rerun the script.")
+        exit(1)
 
-    f = open(os.getenv("SNAPSHOT_STORAGE_FILE"),"r")
-    snapshot_id = f.read()
+    print(f"🔍 Checking progress for snapshot: {snapshot_id}")
 
-    response = requests.get('https://api.brightdata.com/datasets/v3/progress/'+snapshot_id, headers=headers_status)
-    
-    status = response.json()['status']
+    response = requests.get(
+        'https://api.brightdata.com/datasets/v3/progress/' + snapshot_id,
+        headers=headers_status
+    )
 
-    print("status")
-    print(status)
+    if response.status_code != 200:
+        print(f"❌ Failed to get snapshot progress: {response.status_code}")
+        print(response.text)
+        exit(1)
 
+    status = response.json().get('status', 'unknown')
+    print("📊 Snapshot status:", status)
 
-    snapshot_ready = False
+    if status == "ready":
+        print("✅ Snapshot is ready! Fetching dataset content...")
 
-    if(status == "ready"):
-        print("Snapshot is ready")
-        snapshot_ready = True
+        response = requests.get(
+            'https://api.brightdata.com/datasets/v3/snapshot/' + snapshot_id,
+            headers=headers
+        )
+
+        if response.status_code == 200:
+            data_path = os.path.join(dataset_folder, "data.txt")
+            with open(data_path, "wb") as f:
+                f.write(response.content)
+            print(f"✅ Dataset saved successfully at: {data_path}")
+        else:
+            print(f"❌ Failed to download dataset: {response.status_code}")
+            print(response.text)
     else:
-        print("Snapshot is NOT READY YET")
-
-
-    print("")
-
-###############################   IF ALL WEBSITES ARE READY, FETCH DATA AND WRITE TO FILES   ######################################################################
-
-    if snapshot_ready:
-        print("== > All articles are ready - start writing data to datasets directory")
-
-
-        response = requests.get('https://api.brightdata.com/datasets/v3/snapshot/'+snapshot_id, headers=headers)
-
-        if not os.path.exists(os.getenv("DATASET_STORAGE_FOLDER")):
-             os.makedirs(os.getenv("DATASET_STORAGE_FOLDER"))
-
-        with open(os.getenv("DATASET_STORAGE_FOLDER")+"data.txt", "wb") as f:
-            f.write(response.content)
-
-    else:
-         print("== > Not all articles are scraped yet - try again in a few minutes")
+        print("⏳ Snapshot is not ready yet. Please try again later.")
